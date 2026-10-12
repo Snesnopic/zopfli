@@ -32,4 +32,7 @@ void ZopfliInitOptions(ZopfliOptions* options) {
   options->blocksplitting = 1;
   options->blocksplittinglast = 0;
   options->blocksplittingmax = 15;
+  options->parallel_for = 0;
+  options->parallel_ctx = 0;
+  options->parallel_width = 0;
 }

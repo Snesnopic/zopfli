@@ -28,6 +28,13 @@ extern "C" {
 #endif
 
 /*
+Runs body(arg, i) once for every i in [0, n), possibly concurrently, and
+returns when all of them are done.
+*/
+typedef void (*ZopfliParallelFor)(void* ctx, size_t n,
+                                  void (*body)(void* arg, size_t i), void* arg);
+
+/*
 Options used throughout the program.
 */
 typedef struct ZopfliOptions {
@@ -61,6 +68,15 @@ typedef struct ZopfliOptions {
   extreme results that hurt compression on some files). Default value: 15.
   */
   int blocksplittingmax;
+
+  /*
+  If set, ZopfliDeflate optimizes up to parallel_width master blocks at once
+  through it (all of them if parallel_width is 0) and writes them in order, so
+  the output is the same as without it. Default: NULL.
+  */
+  ZopfliParallelFor parallel_for;
+  void* parallel_ctx;
+  size_t parallel_width;
 } ZopfliOptions;
 
 /* Initializes options with default values. */
