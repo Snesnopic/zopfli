@@ -139,6 +139,11 @@ struct ZopfliPNGOptions {
   ZopfliParallelFor parallel_for;
   void* parallel_ctx;
   size_t parallel_width;
+
+  // If set, zopfli asks it whether to stop (see ZopfliOptions); once it returns
+  // nonzero, the result is incomplete and must be discarded. Default: NULL.
+  int (*stop_requested)(void* ctx);
+  void* stop_ctx;
 };
 
 // Returns 0 on success, error code otherwise.

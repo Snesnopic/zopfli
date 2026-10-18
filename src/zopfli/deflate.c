@@ -888,6 +888,11 @@ static void ComputePart(const ZopfliOptions* options,
   part->npoints = npoints;
 }
 
+static void FreePart(ZopfliPart* part) {
+  ZopfliCleanLZ77Store(&part->lz77);
+  free(part->splitpoints);
+}
+
 /* Writes a computed part and frees it. */
 static void EmitPart(const ZopfliOptions* options, int final, ZopfliPart* part,
                      unsigned char* bp, unsigned char** out, size_t* outsize) {
@@ -900,8 +905,13 @@ static void EmitPart(const ZopfliOptions* options, int final, ZopfliPart* part,
                          bp, out, outsize);
   }
 
-  ZopfliCleanLZ77Store(&part->lz77);
-  free(part->splitpoints);
+  FreePart(part);
+}
+
+/* Whether the caller asked to stop. */
+static int Stopped(const ZopfliOptions* options) {
+  return options->stop_requested &&
+         options->stop_requested(options->stop_ctx);
 }
 
 void ZopfliDeflatePart(const ZopfliOptions* options, int btype, int final,
@@ -949,6 +959,8 @@ static void ComputeBatchPart(void* arg, size_t i) {
   size_t start = (batch->first + i) * ZOPFLI_MASTER_BLOCK_SIZE;
   size_t end = start + ZOPFLI_MASTER_BLOCK_SIZE;
   if (end > batch->insize) end = batch->insize;
+  /* Left empty: the whole batch is freed without being written. */
+  if (Stopped(batch->options)) return;
   ComputePart(batch->options, batch->in, start, end, &batch->parts[i]);
 }
 
@@ -975,7 +987,17 @@ static void DeflateParallel(const ZopfliOptions* options, int final,
 
   for (batch.first = 0; batch.first < nblocks; batch.first += width) {
     size_t n = nblocks - batch.first < width ? nblocks - batch.first : width;
+    /* Empty until computed: a stop can leave some parts out. */
+    for (i = 0; i < n; i++) {
+      ZopfliInitLZ77Store(in, &batch.parts[i].lz77);
+      batch.parts[i].splitpoints = 0;
+      batch.parts[i].npoints = 0;
+    }
     options->parallel_for(options->parallel_ctx, n, ComputeBatchPart, &batch);
+    if (Stopped(options)) {
+      for (i = 0; i < n; i++) FreePart(&batch.parts[i]);
+      break;
+    }
     for (i = 0; i < n; i++) {
       EmitPart(options, final && batch.first + i + 1 == nblocks,
                &batch.parts[i], bp, out, outsize);
@@ -1001,6 +1023,7 @@ void ZopfliDeflate(const ZopfliOptions* options, int btype, int final,
     int masterfinal = (i + ZOPFLI_MASTER_BLOCK_SIZE >= insize);
     int final2 = final && masterfinal;
     size_t size = masterfinal ? insize - i : ZOPFLI_MASTER_BLOCK_SIZE;
+    if (Stopped(options)) break;
     ZopfliDeflatePart(options, btype, final2,
                       in, i, i + size, bp, out, outsize);
     i += size;

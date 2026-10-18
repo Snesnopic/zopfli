@@ -35,4 +35,6 @@ void ZopfliInitOptions(ZopfliOptions* options) {
   options->parallel_for = 0;
   options->parallel_ctx = 0;
   options->parallel_width = 0;
+  options->stop_requested = 0;
+  options->stop_ctx = 0;
 }

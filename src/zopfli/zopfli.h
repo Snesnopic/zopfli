@@ -77,6 +77,14 @@ typedef struct ZopfliOptions {
   ZopfliParallelFor parallel_for;
   void* parallel_ctx;
   size_t parallel_width;
+
+  /*
+  If set, ZopfliDeflate asks it before each master block whether to stop;
+  once it returns nonzero, what was written is incomplete and must be
+  discarded. Default: NULL.
+  */
+  int (*stop_requested)(void* ctx);
+  void* stop_ctx;
 } ZopfliOptions;
 
 /* Initializes options with default values. */

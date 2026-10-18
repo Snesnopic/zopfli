@@ -42,7 +42,9 @@ ZopfliPNGOptions::ZopfliPNGOptions()
   , block_split_strategy(1)
   , parallel_for(0)
   , parallel_ctx(0)
-  , parallel_width(0) {
+  , parallel_width(0)
+  , stop_requested(0)
+  , stop_ctx(0) {
 }
 
 // Deflate compressor passed as fuction pointer to LodePNG to have it use Zopfli
@@ -62,6 +64,8 @@ unsigned CustomPNGDeflate(unsigned char** out, size_t* outsize,
   options.parallel_for = png_options->parallel_for;
   options.parallel_ctx = png_options->parallel_ctx;
   options.parallel_width = png_options->parallel_width;
+  options.stop_requested = png_options->stop_requested;
+  options.stop_ctx = png_options->stop_ctx;
 
   ZopfliDeflate(&options, 2 /* Dynamic */, 1, in, insize, &bp, out, outsize);
 
