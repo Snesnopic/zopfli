@@ -27,6 +27,8 @@ Jyrki Katajainen, Alistair Moffat, Andrew Turpin".
 #include <assert.h>
 #include <stdlib.h>
 #include <limits.h>
+#include <string.h>
+#include "util.h"
 
 typedef struct Node Node;
 
@@ -169,6 +171,54 @@ static int LeafComparator(const void* a, const void* b) {
   return ((const Node*)a)->weight - ((const Node*)b)->weight;
 }
 
+/*
+Sorts leaves by weight, lightest first. The weights are unique, so this gives
+the one order any sort would.
+*/
+static void SortLeaves(Node* leaves, int n) {
+  Node buffer[ZOPFLI_NUM_LL];
+  Node* from = leaves;
+  Node* to = buffer;
+  int width, i;
+
+  if (n > ZOPFLI_NUM_LL) {
+    qsort(leaves, n, sizeof(Node), LeafComparator);
+    return;
+  }
+
+  /* Insertion sort on runs of 8, then bottom-up merges. */
+  for (i = 0; i < n; i += 8) {
+    int end = i + 8 < n ? i + 8 : n;
+    int j;
+    for (j = i + 1; j < end; j++) {
+      Node leaf = leaves[j];
+      int k = j;
+      while (k > i && leaves[k - 1].weight > leaf.weight) {
+        leaves[k] = leaves[k - 1];
+        k--;
+      }
+      leaves[k] = leaf;
+    }
+  }
+  for (width = 8; width < n; width *= 2) {
+    Node* swap;
+    for (i = 0; i < n; i += 2 * width) {
+      int mid = i + width < n ? i + width : n;
+      int end = i + 2 * width < n ? i + 2 * width : n;
+      int a = i, b = mid, out = i;
+      while (a < mid && b < end) {
+        to[out++] = from[a].weight <= from[b].weight ? from[a++] : from[b++];
+      }
+      while (a < mid) to[out++] = from[a++];
+      while (b < end) to[out++] = from[b++];
+    }
+    swap = from;
+    from = to;
+    to = swap;
+  }
+  if (from != leaves) memcpy(leaves, from, n * sizeof(*leaves));
+}
+
 int ZopfliLengthLimitedCodeLengths(
     const size_t* frequencies, int n, int maxbits, unsigned* bitlengths) {
   NodePool pool;
@@ -229,7 +279,7 @@ int ZopfliLengthLimitedCodeLengths(
     }
     leaves[i].weight = (leaves[i].weight << 9) | leaves[i].count;
   }
-  qsort(leaves, numsymbols, sizeof(Node), LeafComparator);
+  SortLeaves(leaves, numsymbols);
   for (i = 0; i < numsymbols; i++) {
     leaves[i].weight >>= 9;
   }
