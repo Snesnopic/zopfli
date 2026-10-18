@@ -39,7 +39,10 @@ ZopfliPNGOptions::ZopfliPNGOptions()
   , use_zopfli(true)
   , num_iterations(15)
   , num_iterations_large(5)
-  , block_split_strategy(1) {
+  , block_split_strategy(1)
+  , parallel_for(0)
+  , parallel_ctx(0)
+  , parallel_width(0) {
 }
 
 // Deflate compressor passed as fuction pointer to LodePNG to have it use Zopfli
@@ -56,6 +59,9 @@ unsigned CustomPNGDeflate(unsigned char** out, size_t* outsize,
   options.verbose = png_options->verbose;
   options.numiterations = insize < 200000
       ? png_options->num_iterations : png_options->num_iterations_large;
+  options.parallel_for = png_options->parallel_for;
+  options.parallel_ctx = png_options->parallel_ctx;
+  options.parallel_width = png_options->parallel_width;
 
   ZopfliDeflate(&options, 2 /* Dynamic */, 1, in, insize, &bp, out, outsize);
 
@@ -264,6 +270,40 @@ unsigned TryOptimize(
   return 0;
 }
 
+// One TryOptimize call, with its result.
+struct StrategyTrial {
+  const std::vector<unsigned char>* image;
+  unsigned w, h;
+  const lodepng::State* inputstate;
+  bool bit16, keep_colortype;
+  const std::vector<unsigned char>* origfile;
+  ZopfliPNGFilterStrategy strategy;
+  bool use_zopfli;
+  int windowsize;
+  const ZopfliPNGOptions* png_options;
+  std::vector<unsigned char> out;
+  unsigned error;
+};
+
+static void RunTrial(void* arg, size_t i) {
+  StrategyTrial& t = (*static_cast<std::vector<StrategyTrial>*>(arg))[i];
+  t.error = TryOptimize(*t.image, t.w, t.h, *t.inputstate, t.bit16,
+                        t.keep_colortype, *t.origfile, t.strategy,
+                        t.use_zopfli, t.windowsize, t.png_options, &t.out);
+}
+
+// Runs the trials, through png_options.parallel_for if it is set. Each trial
+// only writes its own result, so the order they run in doesn't matter.
+static void RunTrials(std::vector<StrategyTrial>* trials,
+                      const ZopfliPNGOptions& png_options) {
+  if (png_options.parallel_for && trials->size() > 1) {
+    png_options.parallel_for(png_options.parallel_ctx, trials->size(),
+                             RunTrial, trials);
+  } else {
+    for (size_t i = 0; i < trials->size(); i++) RunTrial(trials, i);
+  }
+}
+
 // Use fast compression to check which PNG filter strategy gives the smallest
 // output. This allows to then do the slow and good compression only on that
 // filter type.
@@ -274,8 +314,8 @@ unsigned AutoChooseFilterStrategy(const std::vector<unsigned char>& image,
                                   const std::vector<unsigned char>& origfile,
                                   int numstrategies,
                                   ZopfliPNGFilterStrategy* strategies,
-                                  bool* enable) {
-  std::vector<unsigned char> out;
+                                  bool* enable,
+                                  const ZopfliPNGOptions& png_options) {
   size_t bestsize = 0;
   int bestfilter = 0;
 
@@ -285,14 +325,17 @@ unsigned AutoChooseFilterStrategy(const std::vector<unsigned char>& image,
   // better.
   int windowsize = 8192;
 
+  std::vector<StrategyTrial> trials(numstrategies);
   for (int i = 0; i < numstrategies; i++) {
-    out.clear();
-    unsigned error = TryOptimize(image, w, h, inputstate, bit16, keep_colortype,
-                                 origfile, strategies[i], false, windowsize, 0,
-                                 &out);
-    if (error) return error;
-    if (bestsize == 0 || out.size() < bestsize) {
-      bestsize = out.size();
+    trials[i] = StrategyTrial{&image, w, h, &inputstate, bit16, keep_colortype,
+                              &origfile, strategies[i], false, windowsize, 0};
+  }
+  RunTrials(&trials, png_options);
+
+  for (int i = 0; i < numstrategies; i++) {
+    if (trials[i].error) return trials[i].error;
+    if (bestsize == 0 || trials[i].out.size() < bestsize) {
+      bestsize = trials[i].out.size();
       bestfilter = i;
     }
   }
@@ -432,28 +475,38 @@ int ZopfliPNGOptimize(const std::vector<unsigned char>& origpng,
                                        keep_colortype, origpng,
                                        /* Don't try brute force */
                                        kNumFilterStrategies - 1,
-                                       filterstrategies, strategy_enable);
+                                       filterstrategies, strategy_enable,
+                                       png_options);
     }
   }
 
   if (!error) {
     size_t bestsize = 0;
 
+    std::vector<StrategyTrial> trials;
+    std::vector<int> trial_strategy;
     for (int i = 0; i < kNumFilterStrategies; i++) {
       if (!strategy_enable[i]) continue;
+      trials.push_back(StrategyTrial{&image, w, h, &inputstate, bit16,
+                                     keep_colortype, &origpng,
+                                     filterstrategies[i], true /* use_zopfli */,
+                                     windowsize, &png_options});
+      trial_strategy.push_back(i);
+    }
+    RunTrials(&trials, png_options);
 
-      std::vector<unsigned char> temp;
-      error = TryOptimize(image, w, h, inputstate, bit16, keep_colortype,
-                          origpng, filterstrategies[i], true /* use_zopfli */,
-                          windowsize, &png_options, &temp);
+    // In the order of the strategies, as when they're tried one at a time.
+    for (size_t t = 0; t < trials.size(); t++) {
+      error = trials[t].error;
       if (!error) {
         if (verbose) {
           printf("Filter strategy %s: %d bytes\n",
-                 strategy_name[i].c_str(), (int) temp.size());
+                 strategy_name[trial_strategy[t]].c_str(),
+                 (int) trials[t].out.size());
         }
-        if (bestsize == 0 || temp.size() < bestsize) {
-          bestsize = temp.size();
-          (*resultpng).swap(temp);  // Store best result so far in the output.
+        if (bestsize == 0 || trials[t].out.size() < bestsize) {
+          bestsize = trials[t].out.size();
+          (*resultpng).swap(trials[t].out);  // Store best result so far.
         }
       }
     }

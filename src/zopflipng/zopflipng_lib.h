@@ -89,6 +89,8 @@ int CZopfliPNGOptimize(const unsigned char* origpng,
 // C++ API
 #ifdef __cplusplus
 
+#include "../zopfli/zopfli.h"
+
 struct ZopfliPNGOptions {
   ZopfliPNGOptions();
 
@@ -130,6 +132,13 @@ struct ZopfliPNGOptions {
 
   // Unused, left for backwards compatiblity.
   int block_split_strategy;
+
+  // If set, the filter strategies are tried and zopfli's master blocks are
+  // optimized through it, possibly at the same time (see ZopfliOptions). The
+  // output is the same as without it. Default: NULL.
+  ZopfliParallelFor parallel_for;
+  void* parallel_ctx;
+  size_t parallel_width;
 };
 
 // Returns 0 on success, error code otherwise.
