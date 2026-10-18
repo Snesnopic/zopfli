@@ -23,6 +23,7 @@ Author: jyrki.alakuijala@gmail.com (Jyrki Alakuijala)
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "katajainen.h"
 #include "util.h"
@@ -93,9 +94,43 @@ void ZopfliCalculateEntropy(const size_t* count, size_t n, double* bitlengths) {
   }
 }
 
+/* A small alphabet's counts and the bit lengths computed for them. */
+typedef struct BitLengthsEntry {
+  size_t count[ZOPFLI_NUM_D];
+  unsigned char bitlengths[ZOPFLI_NUM_D];
+  unsigned char n;  /* 0 for an empty entry. */
+  unsigned char maxbits;
+} BitLengthsEntry;
+
 void ZopfliCalculateBitLengths(const size_t* count, size_t n, int maxbits,
                                unsigned* bitlengths) {
-  int error = ZopfliLengthLimitedCodeLengths(count, n, maxbits, bitlengths);
+  static ZOPFLI_THREAD_LOCAL BitLengthsEntry cache[ZOPFLI_TREE_CACHE_SIZE];
+  BitLengthsEntry* entry = 0;
+  int error;
+  size_t i;
+
+  /* The code length and distance alphabets: their counts repeat a lot. */
+  if (n <= ZOPFLI_NUM_D) {
+    unsigned long long hash = 14695981039346656037ULL ^ (n * 31 + maxbits);
+    for (i = 0; i < n; i++) {
+      hash = (hash ^ count[i]) * 1099511628211ULL;
+    }
+    entry = &cache[(hash ^ (hash >> 32)) % ZOPFLI_TREE_CACHE_SIZE];
+    if (entry->n == n && entry->maxbits == maxbits &&
+        memcmp(entry->count, count, n * sizeof(*count)) == 0) {
+      for (i = 0; i < n; i++) bitlengths[i] = entry->bitlengths[i];
+      return;
+    }
+  }
+
+  error = ZopfliLengthLimitedCodeLengths(count, n, maxbits, bitlengths);
   (void) error;
   assert(!error);
+
+  if (entry) {
+    memcpy(entry->count, count, n * sizeof(*count));
+    for (i = 0; i < n; i++) entry->bitlengths[i] = (unsigned char)bitlengths[i];
+    entry->n = (unsigned char)n;
+    entry->maxbits = (unsigned char)maxbits;
+  }
 }

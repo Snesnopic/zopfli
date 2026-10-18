@@ -60,6 +60,22 @@ Set it to 0 to disable master blocks.
 #define ZOPFLI_MASTER_BLOCK_SIZE 1000000
 
 /*
+Storage that every thread has its own copy of, for caches of pure functions.
+*/
+#if defined(_MSC_VER)
+#define ZOPFLI_THREAD_LOCAL __declspec(thread)
+#else
+#define ZOPFLI_THREAD_LOCAL __thread
+#endif
+
+/*
+Entries of the per-thread caches of tree computations. Block splitting asks for
+the same trees over and over; each entry holds a complete key, so a hit always
+gives what the computation would have.
+*/
+#define ZOPFLI_TREE_CACHE_SIZE 256
+
+/*
 Used to initialize costs for example
 */
 #define ZOPFLI_LARGE_FLOAT 1e30

@@ -22,6 +22,7 @@ Author: jyrki.alakuijala@gmail.com (Jyrki Alakuijala)
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "blocksplitter.h"
 #include "squeeze.h"
@@ -274,10 +275,34 @@ static void AddDynamicTree(const unsigned* ll_lengths,
 /*
 Gives the exact size of the tree, in bits, as it will be encoded in DEFLATE.
 */
+/* Code lengths of a tree, and the size of their smallest encoding. */
+typedef struct TreeSizeEntry {
+  unsigned char lengths[ZOPFLI_NUM_LL + ZOPFLI_NUM_D];
+  size_t size;  /* 0 for an empty entry. */
+} TreeSizeEntry;
+
 static size_t CalculateTreeSize(const unsigned* ll_lengths,
                                 const unsigned* d_lengths) {
+  static ZOPFLI_THREAD_LOCAL TreeSizeEntry cache[ZOPFLI_TREE_CACHE_SIZE];
+  unsigned char lengths[ZOPFLI_NUM_LL + ZOPFLI_NUM_D];
+  unsigned long long hash = 14695981039346656037ULL;
+  TreeSizeEntry* entry;
   size_t result = 0;
   int i;
+
+  /* Lengths fit in a byte, being at most 15. */
+  for (i = 0; i < ZOPFLI_NUM_LL; i++) lengths[i] = (unsigned char)ll_lengths[i];
+  for (i = 0; i < ZOPFLI_NUM_D; i++) {
+    lengths[ZOPFLI_NUM_LL + i] = (unsigned char)d_lengths[i];
+  }
+  for (i = 0; i < ZOPFLI_NUM_LL + ZOPFLI_NUM_D; i++) {
+    hash = (hash ^ lengths[i]) * 1099511628211ULL;
+  }
+  entry = &cache[(hash ^ (hash >> 32)) % ZOPFLI_TREE_CACHE_SIZE];
+  if (entry->size != 0 &&
+      memcmp(entry->lengths, lengths, sizeof(lengths)) == 0) {
+    return entry->size;
+  }
 
   for(i = 0; i < 8; i++) {
     size_t size = EncodeTree(ll_lengths, d_lengths,
@@ -286,6 +311,8 @@ static size_t CalculateTreeSize(const unsigned* ll_lengths,
     if (result == 0 || size < result) result = size;
   }
 
+  memcpy(entry->lengths, lengths, sizeof(lengths));
+  entry->size = result;
   return result;
 }
 
