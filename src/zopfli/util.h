@@ -87,7 +87,7 @@ This is so because longest match finding has to find the exact distance
 that belongs to each length for the best lz77 strategy.
 Good values: e.g. 5, 8.
 */
-#define ZOPFLI_CACHE_LENGTH 8
+#define ZOPFLI_CACHE_LENGTH 16
 
 /*
 limit the max hash chain hits for this hash value. This has an effect only
