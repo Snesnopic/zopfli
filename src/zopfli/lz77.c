@@ -22,9 +22,48 @@ Author: jyrki.alakuijala@gmail.com (Jyrki Alakuijala)
 #include "util.h"
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#endif
+
+/* Whether 8 bytes loaded into a uint64_t are known to put the first byte
+lowest; elsewhere candidates are compared a byte at a time. */
+#if (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) || \
+    defined(_MSC_VER)
+#define ZOPFLI_WORD_MATCH 1
+#else
+#define ZOPFLI_WORD_MATCH 0
+#endif
+
+/* Index of the lowest set bit of a nonzero x. */
+static int LowestBit64(uint64_t x) {
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_ctzll(x);
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
+  unsigned long i;
+  _BitScanForward64(&i, x);
+  return (int)i;
+#elif defined(_MSC_VER)
+  unsigned long i;
+  if ((uint32_t)x) {
+    _BitScanForward(&i, (uint32_t)x);
+    return (int)i;
+  }
+  _BitScanForward(&i, (uint32_t)(x >> 32));
+  return 32 + (int)i;
+#else
+  int i = 0;
+  while (!(x & 1)) {
+    x >>= 1;
+    i++;
+  }
+  return i;
+#endif
+}
 
 void ZopfliInitLZ77Store(const unsigned char* data, ZopfliLZ77Store* store) {
   store->size = 0;
@@ -430,6 +469,8 @@ void ZopfliFindLongestMatch(ZopfliBlockState* s, const ZopfliHash* h,
 #endif
 
   unsigned dist = 0;  /* Not unsigned short on purpose. */
+  int wordmatch;
+  uint64_t scanword = 0;
 
   int* hhead = h->head;
   unsigned short* hprev = h->prev;
@@ -460,6 +501,12 @@ void ZopfliFindLongestMatch(ZopfliBlockState* s, const ZopfliHash* h,
   }
   arrayend = &array[pos] + limit;
   arrayend_safe = arrayend - 8;
+  scan = &array[pos];
+  /* The first 8 bytes of every candidate are compared at once: a candidate
+  that differs within the best length so far is skipped, and one that differs
+  in them past it gets its length from the first differing byte. */
+  wordmatch = ZOPFLI_WORD_MATCH && pos + 8 <= size;
+  if (wordmatch) memcpy(&scanword, scan, 8);
 
   assert(hval < 65536);
 
@@ -478,7 +525,50 @@ void ZopfliFindLongestMatch(ZopfliBlockState* s, const ZopfliHash* h,
     assert(p == hprev[pp]);
     assert(hhashval[p] == hval);
 
-    if (dist > 0) {
+    if (dist > 0 && wordmatch) {
+      uint64_t diff;
+      assert(dist <= pos);
+      scan = &array[pos];
+      match = &array[pos - dist];
+      memcpy(&diff, match, 8);
+      diff ^= scanword;
+      if (bestlength < 8 ? (diff & (~(uint64_t)0 >> (56 - 8 * bestlength))) != 0
+                         : diff || *(scan + bestlength) != *(match + bestlength)) {
+        /* differs within the best length: can't be longer */
+      } else if (diff) {
+        currentlength = LowestBit64(diff) >> 3;
+        if (currentlength > limit) currentlength = limit;
+      } else {
+        size_t skip = 8;
+        if (skip >= limit) {
+          skip = limit;
+        } else {
+#ifdef ZOPFLI_HASH_SAME
+          unsigned short same0 = h->same[hpos];
+          if (same0 > 8) {
+            unsigned short same1 = h->same[(pos - dist) & ZOPFLI_WINDOW_MASK];
+            size_t same = same0 < same1 ? same0 : same1;
+            if (same > limit) same = limit;
+            if (same > skip) skip = same;
+          }
+#endif
+        }
+        scan = GetMatch(scan + skip, match + skip, arrayend, arrayend_safe);
+        currentlength = scan - &array[pos];
+      }
+
+      if (currentlength > bestlength) {
+        if (sublen) {
+          unsigned short j;
+          for (j = bestlength + 1; j <= currentlength; j++) {
+            sublen[j] = dist;
+          }
+        }
+        bestdist = dist;
+        bestlength = currentlength;
+        if (currentlength >= limit) break;
+      }
+    } else if (dist > 0) {
       assert(pos < size);
       assert(dist <= pos);
       scan = &array[pos];
