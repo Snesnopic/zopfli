@@ -486,6 +486,12 @@ static double LZ77OptimalRun(ZopfliBlockState* s,
   return cost;
 }
 
+/* Whether two statistics give the same GetCostStat. */
+static int SameCostModel(const SymbolStats* a, const SymbolStats* b) {
+  return memcmp(a->ll_symbols, b->ll_symbols, sizeof(a->ll_symbols)) == 0 &&
+         memcmp(a->d_symbols, b->d_symbols, sizeof(a->d_symbols)) == 0;
+}
+
 void ZopfliLZ77Optimal(ZopfliBlockState *s,
                        const unsigned char* in, size_t instart, size_t inend,
                        int numiterations,
@@ -542,12 +548,18 @@ void ZopfliLZ77Optimal(ZopfliBlockState *s,
   /* Repeat statistics with each time the cost model from the previous stat
   run. */
   for (i = 0; i < numiterations; i++) {
-    ZopfliCleanLZ77Store(&currentstore);
-    ZopfliInitLZ77Store(in, &currentstore);
-    LZ77OptimalRun(s, in, instart, inend, &path, &pathsize,
-                   length_array, GetCostStat, (void*)&stats,
-                   &currentstore, h, start, costs);
-    cost = ZopfliCalculateBlockSize(&currentstore, 0, currentstore.size, 2);
+    if (i > 0 && SameCostModel(&stats, &laststats)) {
+      /* A run depends only on the cost model: this one would give the store
+      and the cost the previous run left. */
+      cost = lastcost;
+    } else {
+      ZopfliCleanLZ77Store(&currentstore);
+      ZopfliInitLZ77Store(in, &currentstore);
+      LZ77OptimalRun(s, in, instart, inend, &path, &pathsize,
+                     length_array, GetCostStat, (void*)&stats,
+                     &currentstore, h, start, costs);
+      cost = ZopfliCalculateBlockSize(&currentstore, 0, currentstore.size, 2);
+    }
     if (s->options->verbose_more || (s->options->verbose && cost < bestcost)) {
       fprintf(stderr, "Iteration %d: %d bit\n", i, (int) cost);
     }
