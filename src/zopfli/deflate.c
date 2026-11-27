@@ -483,7 +483,9 @@ static size_t CalculateBlockSymbolSizeGivenCounts(const size_t* ll_counts,
                                                   size_t lstart, size_t lend) {
   size_t result = 0;
   size_t i;
-  if (lstart + ZOPFLI_NUM_LL * 3 > lend) {
+  /* Both ways sum the same integers; the counts are cheaper from about 128
+  symbols on. */
+  if (lstart + 128 > lend) {
     return CalculateBlockSymbolSizeSmall(
         ll_lengths, d_lengths, lz77, lstart, lend);
   } else {
@@ -537,6 +539,7 @@ more efficiently. length contains the size of the histogram.
 void OptimizeHuffmanForRle(int length, size_t* counts) {
   int i, k, stride;
   size_t symbol, sum, limit;
+  int stack_good_for_rle[ZOPFLI_NUM_LL];
   int* good_for_rle;
 
   /* 1) We don't want to touch the trailing zeros. We may break the
@@ -552,7 +555,8 @@ void OptimizeHuffmanForRle(int length, size_t* counts) {
   }
   /* 2) Let's mark all population counts that already can be encoded
   with an rle code.*/
-  good_for_rle = (int*)malloc((unsigned)length * sizeof(int));
+  good_for_rle = length <= ZOPFLI_NUM_LL
+      ? stack_good_for_rle : (int*)malloc((unsigned)length * sizeof(int));
   for (i = 0; i < length; ++i) good_for_rle[i] = 0;
 
   /* Let's not spoil any of the existing good rle codes.
@@ -617,7 +621,7 @@ void OptimizeHuffmanForRle(int length, size_t* counts) {
     }
   }
 
-  free(good_for_rle);
+  if (good_for_rle != stack_good_for_rle) free(good_for_rle);
 }
 
 /*
