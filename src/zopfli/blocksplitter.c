@@ -110,10 +110,76 @@ static double EstimateCost(const ZopfliLZ77Store* lz77,
   return ZopfliCalculateBlockSizeAutoType(lz77, lstart, lend);
 }
 
+/*
+Costs of the ranges of one LZ77 store already estimated. Splitting a block
+estimates again the ranges that start or end where its parent's search did.
+*/
+typedef struct CostCacheEntry {
+  size_t start;
+  size_t end;  /* 0 for an empty entry: ranges are never empty. */
+  double cost;
+} CostCacheEntry;
+
+typedef struct CostCache {
+  CostCacheEntry* entries;
+  size_t capacity;  /* A power of two. */
+  size_t used;
+} CostCache;
+
+static void InitCostCache(CostCache* cache) {
+  cache->capacity = 1024;
+  cache->used = 0;
+  cache->entries =
+      (CostCacheEntry*)calloc(cache->capacity, sizeof(*cache->entries));
+  if (!cache->entries) exit(-1); /* Allocation failed. */
+}
+
+static CostCacheEntry* FindCostCacheEntry(CostCacheEntry* entries,
+                                          size_t capacity,
+                                          size_t start, size_t end) {
+  size_t i = (size_t)(((unsigned long long)start * 0x9E3779B97F4A7C15ULL ^
+                       (unsigned long long)end * 0xC2B2AE3D27D4EB4FULL) >> 17)
+             & (capacity - 1);
+  while (entries[i].end != 0 &&
+         (entries[i].start != start || entries[i].end != end)) {
+    i = (i + 1) & (capacity - 1);
+  }
+  return &entries[i];
+}
+
+static double CachedCost(CostCache* cache, const ZopfliLZ77Store* lz77,
+                         size_t start, size_t end) {
+  CostCacheEntry* entry =
+      FindCostCacheEntry(cache->entries, cache->capacity, start, end);
+  if (entry->end != 0) return entry->cost;
+  if (2 * (cache->used + 1) > cache->capacity) {
+    CostCacheEntry* old = cache->entries;
+    size_t oldcapacity = cache->capacity, i;
+    cache->capacity *= 2;
+    cache->entries =
+        (CostCacheEntry*)calloc(cache->capacity, sizeof(*cache->entries));
+    if (!cache->entries) exit(-1); /* Allocation failed. */
+    for (i = 0; i < oldcapacity; i++) {
+      if (old[i].end != 0) {
+        *FindCostCacheEntry(cache->entries, cache->capacity,
+                            old[i].start, old[i].end) = old[i];
+      }
+    }
+    free(old);
+    entry = FindCostCacheEntry(cache->entries, cache->capacity, start, end);
+  }
+  entry->start = start;
+  entry->end = end;
+  entry->cost = EstimateCost(lz77, start, end);
+  cache->used++;
+  return entry->cost;
+}
+
 typedef struct SplitCostContext {
   const ZopfliLZ77Store* lz77;
   size_t start;
   size_t end;
+  CostCache* cache;
 } SplitCostContext;
 
 
@@ -124,7 +190,8 @@ type: FindMinimumFun
 */
 static double SplitCost(size_t i, void* context) {
   SplitCostContext* c = (SplitCostContext*)context;
-  return EstimateCost(c->lz77, c->start, i) + EstimateCost(c->lz77, i, c->end);
+  return CachedCost(c->cache, c->lz77, c->start, i) +
+         CachedCost(c->cache, c->lz77, i, c->end);
 }
 
 static void AddSorted(size_t value, size_t** out, size_t* outsize) {
@@ -221,12 +288,14 @@ void ZopfliBlockSplitLZ77(const ZopfliOptions* options,
   size_t numblocks = 1;
   unsigned char* done;
   double splitcost, origcost;
+  CostCache cache;
 
   if (lz77->size < 10) return;  /* This code fails on tiny files. */
 
   done = (unsigned char*)malloc(lz77->size);
   if (!done) exit(-1); /* Allocation failed. */
   for (i = 0; i < lz77->size; i++) done[i] = 0;
+  InitCostCache(&cache);
 
   lstart = 0;
   lend = lz77->size;
@@ -240,13 +309,14 @@ void ZopfliBlockSplitLZ77(const ZopfliOptions* options,
     c.lz77 = lz77;
     c.start = lstart;
     c.end = lend;
+    c.cache = &cache;
     assert(lstart < lend);
     llpos = FindMinimum(SplitCost, &c, lstart + 1, lend, &splitcost);
 
     assert(llpos > lstart);
     assert(llpos < lend);
 
-    origcost = EstimateCost(lz77, lstart, lend);
+    origcost = CachedCost(&cache, lz77, lstart, lend);
 
     if (splitcost > origcost || llpos == lstart + 1 || llpos == lend) {
       done[lstart] = 1;
@@ -270,6 +340,7 @@ void ZopfliBlockSplitLZ77(const ZopfliOptions* options,
   }
 
   free(done);
+  free(cache.entries);
 }
 
 void ZopfliBlockSplit(const ZopfliOptions* options,
