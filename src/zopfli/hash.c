@@ -22,6 +22,7 @@ Author: jyrki.alakuijala@gmail.com (Jyrki Alakuijala)
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define HASH_SHIFT 5
 #define HASH_MASK 32767
@@ -69,6 +70,23 @@ void ZopfliResetHash(size_t window_size, ZopfliHash* h) {
     h->prev2[i] = i;
     h->hashval2[i] = -1;
   }
+#endif
+}
+
+void ZopfliCopyHash(const ZopfliHash* from, size_t window_size,
+                    ZopfliHash* to) {
+  to->val = from->val;
+  memcpy(to->head, from->head, sizeof(*to->head) * 65536);
+  memcpy(to->prev, from->prev, sizeof(*to->prev) * window_size);
+  memcpy(to->hashval, from->hashval, sizeof(*to->hashval) * window_size);
+#ifdef ZOPFLI_HASH_SAME
+  memcpy(to->same, from->same, sizeof(*to->same) * window_size);
+#endif
+#ifdef ZOPFLI_HASH_SAME_HASH
+  to->val2 = from->val2;
+  memcpy(to->head2, from->head2, sizeof(*to->head2) * 65536);
+  memcpy(to->prev2, from->prev2, sizeof(*to->prev2) * window_size);
+  memcpy(to->hashval2, from->hashval2, sizeof(*to->hashval2) * window_size);
 #endif
 }
 

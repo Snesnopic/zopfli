@@ -55,6 +55,9 @@ void ZopfliResetHash(size_t window_size, ZopfliHash* h);
 /* Frees ZopfliHash memory. */
 void ZopfliCleanHash(ZopfliHash* h);
 
+/* Copies the state of a hash allocated with the same window size. */
+void ZopfliCopyHash(const ZopfliHash* from, size_t window_size, ZopfliHash* to);
+
 /*
 Updates the hash values based on the current position in the array. All calls
 to this must be made for consecutive bytes.
