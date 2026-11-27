@@ -929,6 +929,39 @@ typedef struct ZopfliPart {
 Finds the block boundaries and the LZ77 data of in[instart, inend). It only
 reads the input, so parts can be computed in any order or at the same time.
 */
+/* Whether the caller asked to stop. */
+static int Stopped(const ZopfliOptions* options) {
+  return options->stop_requested &&
+         options->stop_requested(options->stop_ctx);
+}
+
+/* The blocks of one master block, optimized through options->parallel_for. */
+typedef struct BlockBatch {
+  const ZopfliOptions* options;
+  const unsigned char* in;
+  size_t instart;
+  size_t inend;
+  const size_t* splitpoints;
+  size_t npoints;
+  ZopfliLZ77Store* stores;
+  double* costs;
+} BlockBatch;
+
+static void ComputeBlock(void* arg, size_t i) {
+  BlockBatch* batch = (BlockBatch*)arg;
+  size_t start = i == 0 ? batch->instart : batch->splitpoints[i - 1];
+  size_t end = i == batch->npoints ? batch->inend : batch->splitpoints[i];
+  ZopfliBlockState s;
+  /* Left empty: the caller checks for a stop before writing anything. */
+  if (Stopped(batch->options)) return;
+  ZopfliInitBlockState(batch->options, start, end, 1, &s);
+  ZopfliLZ77Optimal(&s, batch->in, start, end, batch->options->numiterations,
+                    &batch->stores[i]);
+  batch->costs[i] = ZopfliCalculateBlockSizeAutoType(&batch->stores[i], 0,
+                                                     batch->stores[i].size);
+  ZopfliCleanBlockState(&s);
+}
+
 static void ComputePart(const ZopfliOptions* options,
                         const unsigned char* in, size_t instart, size_t inend,
                         ZopfliPart* part) {
@@ -949,7 +982,35 @@ static void ComputePart(const ZopfliOptions* options,
 
   ZopfliInitLZ77Store(in, lz77);
 
-  for (i = 0; i <= npoints; i++) {
+  if (options->parallel_for && npoints > 0) {
+    /* The blocks don't depend on each other: optimize them concurrently, then
+    add them up in order. */
+    BlockBatch batch;
+    batch.options = options;
+    batch.in = in;
+    batch.instart = instart;
+    batch.inend = inend;
+    batch.splitpoints = splitpoints_uncompressed;
+    batch.npoints = npoints;
+    batch.stores =
+        (ZopfliLZ77Store*)malloc(sizeof(*batch.stores) * (npoints + 1));
+    batch.costs = (double*)malloc(sizeof(*batch.costs) * (npoints + 1));
+    if (!batch.stores || !batch.costs) exit(-1); /* Allocation failed. */
+    for (i = 0; i <= npoints; i++) {
+      ZopfliInitLZ77Store(in, &batch.stores[i]);
+      batch.costs[i] = 0;
+    }
+    options->parallel_for(options->parallel_ctx, npoints + 1, ComputeBlock,
+                          &batch);
+    for (i = 0; i <= npoints; i++) {
+      totalcost += batch.costs[i];
+      ZopfliAppendLZ77Store(&batch.stores[i], lz77);
+      if (i < npoints) splitpoints[i] = lz77->size;
+      ZopfliCleanLZ77Store(&batch.stores[i]);
+    }
+    free(batch.stores);
+    free(batch.costs);
+  } else for (i = 0; i <= npoints; i++) {
     size_t start = i == 0 ? instart : splitpoints_uncompressed[i - 1];
     size_t end = i == npoints ? inend : splitpoints_uncompressed[i];
     ZopfliBlockState s;
@@ -1015,12 +1076,6 @@ static void EmitPart(const ZopfliOptions* options, int final, ZopfliPart* part,
   FreePart(part);
 }
 
-/* Whether the caller asked to stop. */
-static int Stopped(const ZopfliOptions* options) {
-  return options->stop_requested &&
-         options->stop_requested(options->stop_ctx);
-}
-
 void ZopfliDeflatePart(const ZopfliOptions* options, int btype, int final,
                        const unsigned char* in, size_t instart, size_t inend,
                        unsigned char* bp, unsigned char** out,
@@ -1049,6 +1104,11 @@ void ZopfliDeflatePart(const ZopfliOptions* options, int btype, int final,
   }
 
   ComputePart(options, in, instart, inend, &part);
+  /* blocks optimized concurrently can be missing after a stop */
+  if (options->parallel_for && Stopped(options)) {
+    FreePart(&part);
+    return;
+  }
   EmitPart(options, final, &part, bp, out, outsize);
 }
 

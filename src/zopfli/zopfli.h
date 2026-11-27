@@ -35,6 +35,11 @@ typedef void (*ZopfliParallelFor)(void* ctx, size_t n,
                                   void (*body)(void* arg, size_t i), void* arg);
 
 /*
+Defined by this zopfli, whose ZopfliOptions has parallel_for and stop_requested.
+*/
+#define ZOPFLI_PARALLEL_FOR 1
+
+/*
 Options used throughout the program.
 */
 typedef struct ZopfliOptions {
