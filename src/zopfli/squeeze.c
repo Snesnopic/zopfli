@@ -234,8 +234,23 @@ static double GetBestLengths(ZopfliBlockState *s,
   double mincostaddcostj;
   const SymbolStats* stats =
       costmodel == GetCostStat ? (const SymbolStats*)costcontext : 0;
+  /* For each count of distance extra bits, the smallest sum of the length
+  extra bits and the length symbol cost, as GetCostStat adds them. */
+  double minlengthcost[16];
 
   if (instart == inend) return 0;
+
+  if (stats) {
+    int dbits;
+    for (dbits = 0; dbits < 16; dbits++) {
+      minlengthcost[dbits] = ZOPFLI_LARGE_FLOAT;
+      for (k = 3; k <= ZOPFLI_MAX_MATCH; k++) {
+        double c = ZopfliGetLengthExtraBits(k) + dbits
+            + stats->ll_symbols[ZopfliGetLengthSymbol(k)];
+        if (c < minlengthcost[dbits]) minlengthcost[dbits] = c;
+      }
+    }
+  }
 
   if (start) {
     ZopfliCopyHash(start, ZOPFLI_WINDOW_SIZE, h);
@@ -294,10 +309,13 @@ static double GetBestLengths(ZopfliBlockState *s,
     kend = zopfli_min(leng, inend-i);
     mincostaddcostj = mincost + costs[j];
     if (stats) {
-      /* GetCostStat inlined, same operations in the same order */
+      /* GetCostStat inlined, same operations in the same order. Floating
+      point addition is monotonic, so no length with this distance costs less
+      than mindistcost: a cost at most that can't be improved. */
       unsigned prevdist = 0;
       int dbits = 0;
       double dcost = 0;
+      double mindistcost = 0;
       for (k = 3; k <= kend; k++) {
         double newCost;
         if (costs[j + k] <= mincostaddcostj) continue;
@@ -306,8 +324,10 @@ static double GetBestLengths(ZopfliBlockState *s,
           if (prevdist) {
             dbits = ZopfliGetDistExtraBits(prevdist);
             dcost = stats->d_symbols[ZopfliGetDistSymbol(prevdist)];
+            mindistcost = minlengthcost[dbits] + dcost + costs[j];
           }
         }
+        if (prevdist && costs[j + k] <= mindistcost) continue;
         if (prevdist) {
           newCost = ZopfliGetLengthExtraBits(k) + dbits
               + stats->ll_symbols[ZopfliGetLengthSymbol(k)] + dcost + costs[j];
