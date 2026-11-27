@@ -275,6 +275,87 @@ static void AddDynamicTree(const unsigned* ll_lengths,
 /*
 Gives the exact size of the tree, in bits, as it will be encoded in DEFLATE.
 */
+/*
+The smallest of EncodeTree's sizes over the 8 combinations of use_16, use_17
+and use_18, computed from the runs of equal code lengths: EncodeTree takes a
+whole run at once when it may repeat it, and one length at a time otherwise.
+*/
+static size_t SmallestTreeSize(const unsigned* ll_lengths,
+                               const unsigned* d_lengths) {
+  unsigned char runsymbol[ZOPFLI_NUM_LL + ZOPFLI_NUM_D];
+  unsigned short runlength[ZOPFLI_NUM_LL + ZOPFLI_NUM_D];
+  static const unsigned order[19] = {
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+  };
+  unsigned hlit = 29, hdist = 29, hlit2, lld_total;
+  size_t numruns = 0, i, r, best = 0;
+  int combo;
+
+  while (hlit > 0 && ll_lengths[257 + hlit - 1] == 0) hlit--;
+  while (hdist > 0 && d_lengths[1 + hdist - 1] == 0) hdist--;
+  hlit2 = hlit + 257;
+  lld_total = hlit2 + hdist + 1;
+  for (i = 0; i < lld_total; i++) {
+    unsigned char symbol = i < hlit2 ? ll_lengths[i] : d_lengths[i - hlit2];
+    if (numruns > 0 && runsymbol[numruns - 1] == symbol) {
+      runlength[numruns - 1]++;
+    } else {
+      runsymbol[numruns] = symbol;
+      runlength[numruns] = 1;
+      numruns++;
+    }
+  }
+
+  for (combo = 0; combo < 8; combo++) {
+    int use_16 = combo & 1, use_17 = combo & 2, use_18 = combo & 4;
+    size_t clcounts[19] = {0};
+    unsigned clcl[19];
+    unsigned hclen = 15;
+    size_t size = 14;
+    for (r = 0; r < numruns; r++) {
+      unsigned symbol = runsymbol[r];
+      unsigned count = runlength[r];
+      if (!(use_16 || (symbol == 0 && (use_17 || use_18)))) {
+        clcounts[symbol] += count;
+        continue;
+      }
+      if (symbol == 0 && count >= 3) {
+        if (use_18) {
+          while (count >= 11) {
+            unsigned count2 = count > 138 ? 138 : count;
+            clcounts[18]++;
+            count -= count2;
+          }
+        }
+        if (use_17) {
+          while (count >= 3) {
+            unsigned count2 = count > 10 ? 10 : count;
+            clcounts[17]++;
+            count -= count2;
+          }
+        }
+      }
+      if (use_16 && count >= 4) {
+        count--;
+        clcounts[symbol]++;
+        while (count >= 3) {
+          unsigned count2 = count > 6 ? 6 : count;
+          clcounts[16]++;
+          count -= count2;
+        }
+      }
+      clcounts[symbol] += count;
+    }
+    ZopfliCalculateBitLengths(clcounts, 19, 7, clcl);
+    while (hclen > 0 && clcounts[order[hclen + 4 - 1]] == 0) hclen--;
+    size += (hclen + 4) * 3;
+    for (i = 0; i < 19; i++) size += clcl[i] * clcounts[i];
+    size += clcounts[16] * 2 + clcounts[17] * 3 + clcounts[18] * 7;
+    if (best == 0 || size < best) best = size;
+  }
+  return best;
+}
+
 /* Code lengths of a tree, and the size of their smallest encoding. */
 typedef struct TreeSizeEntry {
   unsigned char lengths[ZOPFLI_NUM_LL + ZOPFLI_NUM_D];
@@ -304,12 +385,7 @@ static size_t CalculateTreeSize(const unsigned* ll_lengths,
     return entry->size;
   }
 
-  for(i = 0; i < 8; i++) {
-    size_t size = EncodeTree(ll_lengths, d_lengths,
-                             i & 1, i & 2, i & 4,
-                             0, 0, 0);
-    if (result == 0 || size < result) result = size;
-  }
+  result = SmallestTreeSize(ll_lengths, d_lengths);
 
   memcpy(entry->lengths, lengths, sizeof(lengths));
   entry->size = result;
