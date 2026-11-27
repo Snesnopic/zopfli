@@ -219,6 +219,52 @@ static void SortLeaves(Node* leaves, int n) {
   if (from != leaves) memcpy(leaves, from, n * sizeof(*leaves));
 }
 
+/*
+Huffman's algorithm on the sorted leaves, taking an internal node before a leaf
+of the same weight. When no code is longer than maxbits, these are the lengths
+package-merge gives: writes them and returns 1. Otherwise returns 0.
+*/
+static int HuffmanCodeLengths(const Node* leaves, int numsymbols, int maxbits,
+                              unsigned* bitlengths) {
+  size_t weights[ZOPFLI_NUM_LL];
+  int parent[2 * ZOPFLI_NUM_LL];
+  int depth[2 * ZOPFLI_NUM_LL];
+  int lengthcounts[16] = {0};
+  int leaf = 0, node = 0, numnodes = 0;
+  int i, k, len, pos;
+
+  for (i = 0; i < numsymbols - 1; i++) {
+    size_t sum = 0;
+    for (k = 0; k < 2; k++) {
+      if (leaf < numsymbols &&
+          (node == numnodes || leaves[leaf].weight < weights[node])) {
+        sum += leaves[leaf].weight;
+        parent[leaf++] = numsymbols + numnodes;
+      } else {
+        sum += weights[node];
+        parent[numsymbols + node++] = numsymbols + numnodes;
+      }
+    }
+    weights[numnodes++] = sum;
+  }
+  depth[numsymbols + numnodes - 1] = 0;
+  for (i = numsymbols + numnodes - 2; i >= 0; i--) {
+    depth[i] = depth[parent[i]] + 1;
+    if (i < numsymbols) {
+      if (depth[i] > maxbits || depth[i] > 15) return 0;
+      lengthcounts[depth[i]]++;
+    }
+  }
+  /* heaviest leaves get the shortest codes, as in ExtractBitLengths */
+  pos = numsymbols - 1;
+  for (len = 1; len <= 15; len++) {
+    for (k = 0; k < lengthcounts[len]; k++) {
+      bitlengths[leaves[pos--].count] = len;
+    }
+  }
+  return 1;
+}
+
 int ZopfliLengthLimitedCodeLengths(
     const size_t* frequencies, int n, int maxbits, unsigned* bitlengths) {
   NodePool pool;
@@ -282,6 +328,12 @@ int ZopfliLengthLimitedCodeLengths(
   SortLeaves(leaves, numsymbols);
   for (i = 0; i < numsymbols; i++) {
     leaves[i].weight >>= 9;
+  }
+
+  if (numsymbols <= ZOPFLI_NUM_LL &&
+      HuffmanCodeLengths(leaves, numsymbols, maxbits, bitlengths)) {
+    free(leaves);
+    return 0;
   }
 
   if (numsymbols - 1 < maxbits) {
