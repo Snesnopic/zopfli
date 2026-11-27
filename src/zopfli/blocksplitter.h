@@ -61,6 +61,18 @@ void ZopfliBlockSplit(const ZopfliOptions* options,
                       const unsigned char* in, size_t instart, size_t inend,
                       size_t maxblocks, size_t** splitpoints, size_t* npoints);
 
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+/*
+Same as ZopfliBlockSplit, and also keeps the matches its greedy run searched in
+lmc, a longest match cache of in[instart, inend).
+*/
+void ZopfliBlockSplitWithCache(const ZopfliOptions* options,
+                               const unsigned char* in,
+                               size_t instart, size_t inend, size_t maxblocks,
+                               ZopfliLongestMatchCache* lmc,
+                               size_t** splitpoints, size_t* npoints);
+#endif
+
 /*
 Divides the input into equal blocks, does not even take LZ77 lengths into
 account.

@@ -935,6 +935,44 @@ static int Stopped(const ZopfliOptions* options) {
          options->stop_requested(options->stop_ctx);
 }
 
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+/*
+Forgets the matches the block splitter's greedy run found near the end of the
+blocks but the last: there they depend on where the input ends, which is the
+block's end for the block and the master block's end for the splitter. Before
+both 258 bytes from the end and the run of equal bytes that reaches the end,
+the hash chains, the "same" values and the limit are those of the block.
+*/
+static void ForgetBlockEnds(const unsigned char* in, size_t instart,
+                            const size_t* splitpoints, size_t npoints,
+                            ZopfliLongestMatchCache* lmc) {
+  size_t i, j;
+  for (i = 0; i < npoints; i++) {
+    size_t start = i == 0 ? instart : splitpoints[i - 1];
+    size_t end = splitpoints[i];
+    size_t keep = end >= start + ZOPFLI_MAX_MATCH
+        ? end - ZOPFLI_MAX_MATCH + 1 : start;
+    size_t tail = end - 1;
+    while (tail > instart && in[tail - 1] == in[end - 1]) tail--;
+    if (tail < keep) keep = tail < start ? start : tail;
+    for (j = keep; j < end; j++) {
+      lmc->length[j - instart] = 1;
+      lmc->dist[j - instart] = 0;
+    }
+  }
+}
+
+/* Points s at the part of the master block's cache that covers its block. */
+static void ShareCache(ZopfliLongestMatchCache* master, size_t instart,
+                       ZopfliLongestMatchCache* view, ZopfliBlockState* s) {
+  size_t offset = s->blockstart - instart;
+  view->length = master->length + offset;
+  view->dist = master->dist + offset;
+  view->sublen = master->sublen + offset * ZOPFLI_CACHE_LENGTH * 3;
+  s->lmc = view;
+}
+#endif
+
 /* The blocks of one master block, optimized through options->parallel_for. */
 typedef struct BlockBatch {
   const ZopfliOptions* options;
@@ -943,23 +981,60 @@ typedef struct BlockBatch {
   size_t inend;
   const size_t* splitpoints;
   size_t npoints;
+  void* lmc;
   ZopfliLZ77Store* stores;
   double* costs;
 } BlockBatch;
+
+/*
+Starts the block state of in[start, end), on the master block's cache when
+there is one.
+*/
+static void InitBlock(const ZopfliOptions* options, size_t start, size_t end,
+                      void* lmc, size_t instart, void* view,
+                      ZopfliBlockState* s) {
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+  if (lmc) {
+    ZopfliInitBlockState(options, start, end, 0, s);
+    ShareCache((ZopfliLongestMatchCache*)lmc, instart,
+               (ZopfliLongestMatchCache*)view, s);
+    return;
+  }
+#else
+  (void)lmc;
+  (void)instart;
+  (void)view;
+#endif
+  ZopfliInitBlockState(options, start, end, 1, s);
+}
+
+static void CleanBlock(void* lmc, ZopfliBlockState* s) {
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+  if (lmc) s->lmc = 0;
+#else
+  (void)lmc;
+#endif
+  ZopfliCleanBlockState(s);
+}
 
 static void ComputeBlock(void* arg, size_t i) {
   BlockBatch* batch = (BlockBatch*)arg;
   size_t start = i == 0 ? batch->instart : batch->splitpoints[i - 1];
   size_t end = i == batch->npoints ? batch->inend : batch->splitpoints[i];
   ZopfliBlockState s;
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+  ZopfliLongestMatchCache view;
+#else
+  int view;
+#endif
   /* Left empty: the caller checks for a stop before writing anything. */
   if (Stopped(batch->options)) return;
-  ZopfliInitBlockState(batch->options, start, end, 1, &s);
+  InitBlock(batch->options, start, end, batch->lmc, batch->instart, &view, &s);
   ZopfliLZ77Optimal(&s, batch->in, start, end, batch->options->numiterations,
                     &batch->stores[i]);
   batch->costs[i] = ZopfliCalculateBlockSizeAutoType(&batch->stores[i], 0,
                                                      batch->stores[i].size);
-  ZopfliCleanBlockState(&s);
+  CleanBlock(batch->lmc, &s);
 }
 
 static void ComputePart(const ZopfliOptions* options,
@@ -972,11 +1047,29 @@ static void ComputePart(const ZopfliOptions* options,
   size_t* splitpoints = 0;
   double totalcost = 0;
   ZopfliLZ77Store* lz77 = &part->lz77;
+  /* The matches the block splitter searches, for the blocks to reuse. */
+  void* lmc = 0;
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+  ZopfliLongestMatchCache mastercache;
+  ZopfliLongestMatchCache view;
+#else
+  int view;
+#endif
 
   if (options->blocksplitting) {
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+    ZopfliInitCache(inend - instart, &mastercache);
+    lmc = &mastercache;
+    ZopfliBlockSplitWithCache(options, in, instart, inend,
+                              options->blocksplittingmax, &mastercache,
+                              &splitpoints_uncompressed, &npoints);
+    ForgetBlockEnds(in, instart, splitpoints_uncompressed, npoints,
+                    &mastercache);
+#else
     ZopfliBlockSplit(options, in, instart, inend,
                      options->blocksplittingmax,
                      &splitpoints_uncompressed, &npoints);
+#endif
     splitpoints = (size_t*)malloc(sizeof(*splitpoints) * npoints);
   }
 
@@ -992,6 +1085,7 @@ static void ComputePart(const ZopfliOptions* options,
     batch.inend = inend;
     batch.splitpoints = splitpoints_uncompressed;
     batch.npoints = npoints;
+    batch.lmc = lmc;
     batch.stores =
         (ZopfliLZ77Store*)malloc(sizeof(*batch.stores) * (npoints + 1));
     batch.costs = (double*)malloc(sizeof(*batch.costs) * (npoints + 1));
@@ -1016,16 +1110,19 @@ static void ComputePart(const ZopfliOptions* options,
     ZopfliBlockState s;
     ZopfliLZ77Store store;
     ZopfliInitLZ77Store(in, &store);
-    ZopfliInitBlockState(options, start, end, 1, &s);
+    InitBlock(options, start, end, lmc, instart, &view, &s);
     ZopfliLZ77Optimal(&s, in, start, end, options->numiterations, &store);
     totalcost += ZopfliCalculateBlockSizeAutoType(&store, 0, store.size);
 
     ZopfliAppendLZ77Store(&store, lz77);
     if (i < npoints) splitpoints[i] = lz77->size;
 
-    ZopfliCleanBlockState(&s);
+    CleanBlock(lmc, &s);
     ZopfliCleanLZ77Store(&store);
   }
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+  if (lmc) ZopfliCleanCache(&mastercache);
+#endif
 
   /* Second block splitting attempt */
   if (options->blocksplitting && npoints > 1) {

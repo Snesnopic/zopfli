@@ -343,9 +343,10 @@ void ZopfliBlockSplitLZ77(const ZopfliOptions* options,
   free(cache.entries);
 }
 
-void ZopfliBlockSplit(const ZopfliOptions* options,
-                      const unsigned char* in, size_t instart, size_t inend,
-                      size_t maxblocks, size_t** splitpoints, size_t* npoints) {
+static void BlockSplit(const ZopfliOptions* options,
+                       const unsigned char* in, size_t instart, size_t inend,
+                       size_t maxblocks, void* lmc,
+                       size_t** splitpoints, size_t* npoints) {
   size_t pos = 0;
   size_t i;
   ZopfliBlockState s;
@@ -357,6 +358,11 @@ void ZopfliBlockSplit(const ZopfliOptions* options,
 
   ZopfliInitLZ77Store(in, &store);
   ZopfliInitBlockState(options, instart, inend, 0, &s);
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+  s.lmc = (ZopfliLongestMatchCache*)lmc;
+#else
+  (void)lmc;
+#endif
   ZopfliAllocHash(ZOPFLI_WINDOW_SIZE, h);
 
   *npoints = 0;
@@ -385,10 +391,29 @@ void ZopfliBlockSplit(const ZopfliOptions* options,
   assert(*npoints == nlz77points);
 
   free(lz77splitpoints);
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+  s.lmc = 0;
+#endif
   ZopfliCleanBlockState(&s);
   ZopfliCleanLZ77Store(&store);
   ZopfliCleanHash(h);
 }
+
+void ZopfliBlockSplit(const ZopfliOptions* options,
+                      const unsigned char* in, size_t instart, size_t inend,
+                      size_t maxblocks, size_t** splitpoints, size_t* npoints) {
+  BlockSplit(options, in, instart, inend, maxblocks, 0, splitpoints, npoints);
+}
+
+#ifdef ZOPFLI_LONGEST_MATCH_CACHE
+void ZopfliBlockSplitWithCache(const ZopfliOptions* options,
+                               const unsigned char* in,
+                               size_t instart, size_t inend, size_t maxblocks,
+                               ZopfliLongestMatchCache* lmc,
+                               size_t** splitpoints, size_t* npoints) {
+  BlockSplit(options, in, instart, inend, maxblocks, lmc, splitpoints, npoints);
+}
+#endif
 
 void ZopfliBlockSplitSimple(const unsigned char* in,
                             size_t instart, size_t inend,
