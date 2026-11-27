@@ -231,6 +231,8 @@ static double GetBestLengths(ZopfliBlockState *s,
   double result;
   double mincost = GetCostModelMinCost(costmodel, costcontext);
   double mincostaddcostj;
+  const SymbolStats* stats =
+      costmodel == GetCostStat ? (const SymbolStats*)costcontext : 0;
 
   if (instart == inend) return 0;
 
@@ -275,7 +277,8 @@ static double GetBestLengths(ZopfliBlockState *s,
 
     /* Literal. */
     if (i + 1 <= inend) {
-      double newCost = costmodel(in[i], 0, costcontext) + costs[j];
+      double newCost = (stats ? stats->ll_symbols[in[i]]
+                              : costmodel(in[i], 0, costcontext)) + costs[j];
       assert(newCost >= 0);
       if (newCost < costs[j + 1]) {
         costs[j + 1] = newCost;
@@ -285,6 +288,36 @@ static double GetBestLengths(ZopfliBlockState *s,
     /* Lengths. */
     kend = zopfli_min(leng, inend-i);
     mincostaddcostj = mincost + costs[j];
+    if (stats) {
+      /* GetCostStat inlined, same operations in the same order */
+      unsigned prevdist = 0;
+      int dbits = 0;
+      double dcost = 0;
+      for (k = 3; k <= kend; k++) {
+        double newCost;
+        if (costs[j + k] <= mincostaddcostj) continue;
+        if (sublen[k] != prevdist) {
+          prevdist = sublen[k];
+          if (prevdist) {
+            dbits = ZopfliGetDistExtraBits(prevdist);
+            dcost = stats->d_symbols[ZopfliGetDistSymbol(prevdist)];
+          }
+        }
+        if (prevdist) {
+          newCost = ZopfliGetLengthExtraBits(k) + dbits
+              + stats->ll_symbols[ZopfliGetLengthSymbol(k)] + dcost + costs[j];
+        } else {
+          newCost = stats->ll_symbols[k] + costs[j];
+        }
+        assert(newCost >= 0);
+        if (newCost < costs[j + k]) {
+          assert(k <= ZOPFLI_MAX_MATCH);
+          costs[j + k] = newCost;
+          length_array[j + k] = k;
+        }
+      }
+      continue;
+    }
     for (k = 3; k <= kend; k++) {
       double newCost;
 
