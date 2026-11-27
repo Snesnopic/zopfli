@@ -384,11 +384,14 @@ static const unsigned char* GetMatch(const unsigned char* scan,
 Gets distance, length and sublen values from the cache if possible.
 Returns 1 if it got the values from the cache, 0 if not.
 Updates the limit value to a smaller one if possible with more limited
-information from the cache.
+information from the cache. When the cache holds only the shorter lengths of a
+match, fills sublen with them and gives the longest of them and its distance
+in resumelength and resumedist.
 */
 static int TryGetFromLongestMatchCache(ZopfliBlockState* s,
     size_t pos, size_t* limit,
-    unsigned short* sublen, unsigned short* distance, unsigned short* length) {
+    unsigned short* sublen, unsigned short* distance, unsigned short* length,
+    unsigned short* resumelength, unsigned short* resumedist) {
   /* The LMC cache starts at the beginning of the block rather than the
      beginning of the whole array. */
   size_t lmcpos = pos - s->blockstart;
@@ -421,6 +424,15 @@ static int TryGetFromLongestMatchCache(ZopfliBlockState* s,
     /* Can't use much of the cache, since the "sublens" need to be calculated,
        but at  least we already know when to stop. */
     *limit = s->lmc->length[lmcpos];
+    if (sublen) {
+      unsigned maxcached =
+          ZopfliMaxCachedSublen(s->lmc, lmcpos, s->lmc->length[lmcpos]);
+      if (maxcached >= ZOPFLI_MIN_MATCH && maxcached < *limit) {
+        ZopfliCacheToSublen(s->lmc, lmcpos, maxcached, sublen);
+        *resumelength = maxcached;
+        *resumedist = sublen[maxcached];
+      }
+    }
   }
 
   return 0;
@@ -453,6 +465,43 @@ static void StoreInLongestMatchCache(ZopfliBlockState* s,
 }
 #endif
 
+/* Where a chain walk goes on after the candidate at dist. */
+typedef struct ChainResume {
+  unsigned dist;
+  unsigned short p;
+  unsigned short pp;
+  int second;
+} ChainResume;
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#elif defined(_MSC_VER)
+__declspec(noinline)
+#endif
+static ChainResume ResumeChain(const ZopfliHash* h, size_t pos,
+                               unsigned short bestlength, unsigned dist) {
+  ChainResume r;
+  unsigned short hpos = pos & ZOPFLI_WINDOW_MASK;
+  unsigned short p = (pos - dist) & ZOPFLI_WINDOW_MASK;
+  const unsigned short* hprev = h->prev;
+  assert(h->hashval[p] == h->val);
+  r.second = 0;
+#ifdef ZOPFLI_HASH_SAME_HASH
+  if (bestlength >= h->same[hpos] && h->val2 == h->hashval2[p]) {
+    r.second = 1;
+    hprev = h->prev2;
+  }
+#else
+  (void)hpos;
+  (void)bestlength;
+#endif
+  r.pp = p;
+  r.p = hprev[p];
+  r.dist = r.p == r.pp ? ZOPFLI_WINDOW_SIZE
+      : dist + (r.p < r.pp ? r.pp - r.p : ((ZOPFLI_WINDOW_SIZE - r.p) + r.pp));
+  return r;
+}
+
 void ZopfliFindLongestMatch(ZopfliBlockState* s, const ZopfliHash* h,
     const unsigned char* array,
     size_t pos, size_t size, size_t limit,
@@ -476,9 +525,12 @@ void ZopfliFindLongestMatch(ZopfliBlockState* s, const ZopfliHash* h,
   unsigned short* hprev = h->prev;
   int* hhashval = h->hashval;
   int hval = h->val;
+  unsigned short resumelength = 0;
+  unsigned short resumedist = 0;
 
 #ifdef ZOPFLI_LONGEST_MATCH_CACHE
-  if (TryGetFromLongestMatchCache(s, pos, &limit, sublen, distance, length)) {
+  if (TryGetFromLongestMatchCache(s, pos, &limit, sublen, distance, length,
+                                  &resumelength, &resumedist)) {
     assert(pos + *length <= size);
     return;
   }
@@ -510,12 +562,33 @@ void ZopfliFindLongestMatch(ZopfliBlockState* s, const ZopfliHash* h,
 
   assert(hval < 65536);
 
-  pp = hhead[hval];  /* During the whole loop, p == hprev[pp]. */
-  p = hprev[pp];
+  if (resumelength) {
+    /* An earlier search of this position walked the same chain and found the
+    lengths up to resumelength by resumedist, without reaching the chain hit
+    limit before the longest match: go on from the candidate at resumedist,
+    which is on the first chain since it matches 3 bytes. */
+    ChainResume r = ResumeChain(h, pos, resumelength, resumedist);
+    bestlength = resumelength;
+    bestdist = resumedist;
+    dist = r.dist;
+    p = r.p;
+    pp = r.pp;
+#ifdef ZOPFLI_HASH_SAME_HASH
+    if (r.second) {
+      hhead = h->head2;
+      hprev = h->prev2;
+      hhashval = h->hashval2;
+      hval = h->val2;
+    }
+#endif
+  } else {
+    pp = hhead[hval];  /* During the whole loop, p == hprev[pp]. */
+    p = hprev[pp];
 
-  assert(pp == hpos);
+    assert(pp == hpos);
 
-  dist = p < pp ? pp - p : ((ZOPFLI_WINDOW_SIZE - p) + pp);
+    dist = p < pp ? pp - p : ((ZOPFLI_WINDOW_SIZE - p) + pp);
+  }
 
   /* Go through all distances. */
   while (dist < ZOPFLI_WINDOW_SIZE) {
@@ -631,6 +704,7 @@ void ZopfliFindLongestMatch(ZopfliBlockState* s, const ZopfliHash* h,
   }
 
 #ifdef ZOPFLI_LONGEST_MATCH_CACHE
+  assert(!resumelength || bestlength == limit);
   StoreInLongestMatchCache(s, pos, limit, sublen, bestdist, bestlength);
 #endif
 
