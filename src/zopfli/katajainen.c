@@ -220,6 +220,47 @@ static void SortLeaves(Node* leaves, int n) {
 }
 
 /*
+Sorts leaves that are in symbol order by weight, keeping symbol order among
+equal weights, which is the order sorting by (weight << 9) | symbol gives. Does
+it with one or two stable radix passes when all weights fit in 16 bits, and
+returns 0 without sorting otherwise.
+*/
+static int RadixSortLeaves(Node* leaves, int n) {
+  Node buffer[ZOPFLI_NUM_LL];
+  Node* from = leaves;
+  Node* to = buffer;
+  size_t maxweight = 0;
+  int i, pass, passes;
+
+  if (n > ZOPFLI_NUM_LL) return 0;
+  for (i = 0; i < n; i++) {
+    if (leaves[i].weight > maxweight) maxweight = leaves[i].weight;
+  }
+  if (maxweight >= 65536) return 0;
+  passes = maxweight < 256 ? 1 : 2;
+  for (pass = 0; pass < passes; pass++) {
+    int shift = pass * 8;
+    int buckets = pass == passes - 1 ? (int)(maxweight >> shift) + 1 : 256;
+    int start[256];
+    int sum = 0;
+    Node* swap;
+    for (i = 0; i < buckets; i++) start[i] = 0;
+    for (i = 0; i < n; i++) start[(from[i].weight >> shift) & 255]++;
+    for (i = 0; i < buckets; i++) {
+      int bucketsize = start[i];
+      start[i] = sum;
+      sum += bucketsize;
+    }
+    for (i = 0; i < n; i++) to[start[(from[i].weight >> shift) & 255]++] = from[i];
+    swap = from;
+    from = to;
+    to = swap;
+  }
+  if (from != leaves) memcpy(leaves, from, n * sizeof(*leaves));
+  return 1;
+}
+
+/*
 Huffman's algorithm on the sorted leaves, taking an internal node before a leaf
 of the same weight. When no code is longer than maxbits, these are the lengths
 package-merge gives: writes them and returns 1. Otherwise returns 0.
@@ -278,7 +319,9 @@ int ZopfliLengthLimitedCodeLengths(
   Node* (*lists)[2];
 
   /* One leaf per symbol. Only numsymbols leaves will be used. */
-  Node* leaves = (Node*)malloc(n * sizeof(*leaves));
+  Node stackleaves[ZOPFLI_NUM_LL];
+  Node* leaves = n <= ZOPFLI_NUM_LL
+      ? stackleaves : (Node*)malloc(n * sizeof(*leaves));
 
   /* Initialize all bitlengths at 0. */
   for (i = 0; i < n; i++) {
@@ -296,43 +339,45 @@ int ZopfliLengthLimitedCodeLengths(
 
   /* Check special cases and error conditions. */
   if ((1 << maxbits) < numsymbols) {
-    free(leaves);
+    if (leaves != stackleaves) free(leaves);
     return 1;  /* Error, too few maxbits to represent symbols. */
   }
   if (numsymbols == 0) {
-    free(leaves);
+    if (leaves != stackleaves) free(leaves);
     return 0;  /* No symbols at all. OK. */
   }
   if (numsymbols == 1) {
     bitlengths[leaves[0].count] = 1;
-    free(leaves);
+    if (leaves != stackleaves) free(leaves);
     return 0;  /* Only one symbol, give it bitlength 1, not 0. OK. */
   }
   if (numsymbols == 2) {
     bitlengths[leaves[0].count]++;
     bitlengths[leaves[1].count]++;
-    free(leaves);
+    if (leaves != stackleaves) free(leaves);
     return 0;
   }
 
-  /* Sort the leaves from lightest to heaviest. Add count into the same
-  variable for stable sorting. */
-  for (i = 0; i < numsymbols; i++) {
-    if (leaves[i].weight >=
-        ((size_t)1 << (sizeof(leaves[0].weight) * CHAR_BIT - 9))) {
-      free(leaves);
-      return 1;  /* Error, we need 9 bits for the count. */
+  if (!RadixSortLeaves(leaves, numsymbols)) {
+    /* Sort the leaves from lightest to heaviest. Add count into the same
+    variable for stable sorting. */
+    for (i = 0; i < numsymbols; i++) {
+      if (leaves[i].weight >=
+          ((size_t)1 << (sizeof(leaves[0].weight) * CHAR_BIT - 9))) {
+        if (leaves != stackleaves) free(leaves);
+        return 1;  /* Error, we need 9 bits for the count. */
+      }
+      leaves[i].weight = (leaves[i].weight << 9) | leaves[i].count;
     }
-    leaves[i].weight = (leaves[i].weight << 9) | leaves[i].count;
-  }
-  SortLeaves(leaves, numsymbols);
-  for (i = 0; i < numsymbols; i++) {
-    leaves[i].weight >>= 9;
+    SortLeaves(leaves, numsymbols);
+    for (i = 0; i < numsymbols; i++) {
+      leaves[i].weight >>= 9;
+    }
   }
 
   if (numsymbols <= ZOPFLI_NUM_LL &&
       HuffmanCodeLengths(leaves, numsymbols, maxbits, bitlengths)) {
-    free(leaves);
+    if (leaves != stackleaves) free(leaves);
     return 0;
   }
 
@@ -358,7 +403,7 @@ int ZopfliLengthLimitedCodeLengths(
   ExtractBitLengths(lists[maxbits - 1][1], leaves, bitlengths);
 
   free(lists);
-  free(leaves);
+  if (leaves != stackleaves) free(leaves);
   free(nodes);
   return 0;  /* OK. */
 }
