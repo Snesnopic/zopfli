@@ -506,6 +506,53 @@ static double LZ77OptimalRun(ZopfliBlockState* s,
   return cost;
 }
 
+/* Positions per range when the longest match cache is filled in parallel. */
+#define ZOPFLI_PREFILL_RANGE 65536
+
+typedef struct PrefillBatch {
+  ZopfliBlockState* s;
+  const unsigned char* in;
+  size_t instart;
+  size_t inend;
+} PrefillBatch;
+
+/*
+Searches the longest matches of one range of a block into its cache, as the
+first GetBestLengths run would. The hash starts a window before the range, so
+the chains within the window, and so the matches, are the same as there.
+*/
+static void PrefillRange(void* arg, size_t r) {
+  PrefillBatch* batch = (PrefillBatch*)arg;
+  size_t start = batch->instart + r * ZOPFLI_PREFILL_RANGE;
+  size_t end = zopfli_min(start + ZOPFLI_PREFILL_RANGE, batch->inend);
+  size_t windowstart = start > ZOPFLI_WINDOW_SIZE
+      ? start - ZOPFLI_WINDOW_SIZE : 0;
+  unsigned short sublen[259];
+  unsigned short dist, leng;
+  ZopfliHash hash;
+  ZopfliHash* h = &hash;
+  size_t i;
+
+  ZopfliAllocHash(ZOPFLI_WINDOW_SIZE, h);
+  ZopfliResetHash(ZOPFLI_WINDOW_SIZE, h);
+  ZopfliWarmupHash(batch->in, windowstart, batch->inend, h);
+  for (i = windowstart; i < start; i++) {
+    ZopfliUpdateHash(batch->in, i, batch->inend, h);
+  }
+  for (i = start; i < end; i++) {
+    ZopfliUpdateHash(batch->in, i, batch->inend, h);
+    /* deep in a long repetition GetBestLengths mostly skips the search */
+    if (h->same[i & ZOPFLI_WINDOW_MASK] > ZOPFLI_MAX_MATCH * 2 &&
+        i > ZOPFLI_MAX_MATCH &&
+        h->same[(i - ZOPFLI_MAX_MATCH) & ZOPFLI_WINDOW_MASK] > ZOPFLI_MAX_MATCH) {
+      continue;
+    }
+    ZopfliFindLongestMatch(batch->s, h, batch->in, i, batch->inend,
+                           ZOPFLI_MAX_MATCH, sublen, &dist, &leng);
+  }
+  ZopfliCleanHash(h);
+}
+
 /* Whether two statistics give the same GetCostStat. */
 static int SameCostModel(const SymbolStats* a, const SymbolStats* b) {
   return memcmp(a->ll_symbols, b->ll_symbols, sizeof(a->ll_symbols)) == 0 &&
@@ -564,6 +611,19 @@ void ZopfliLZ77Optimal(ZopfliBlockState *s,
   /* Initial run. */
   ZopfliLZ77Greedy(s, in, instart, inend, &currentstore, h);
   GetStatistics(&currentstore, &stats);
+
+  /* the first run would search every position one after the other */
+  if (s->options->parallel_for && s->lmc &&
+      blocksize >= 2 * ZOPFLI_PREFILL_RANGE) {
+    PrefillBatch batch;
+    batch.s = s;
+    batch.in = in;
+    batch.instart = instart;
+    batch.inend = inend;
+    s->options->parallel_for(s->options->parallel_ctx,
+        (blocksize + ZOPFLI_PREFILL_RANGE - 1) / ZOPFLI_PREFILL_RANGE,
+        PrefillRange, &batch);
+  }
 
   /* Repeat statistics with each time the cost model from the previous stat
   run. */
